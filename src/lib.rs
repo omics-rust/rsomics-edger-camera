@@ -106,15 +106,7 @@ pub fn run(opts: &Options) -> Result<Results> {
             .iter()
             .filter_map(|g| gene_index.get(g.as_str()).copied())
             .collect();
-        if idx.len() < 2 || idx.len() >= expr.genes.len() - 1 {
-            continue;
-        }
         results.push(engine.test(&set.name, &idx, &cor));
-    }
-    if results.is_empty() {
-        return Err(RsomicsError::InvalidInput(
-            "no gene set had between 2 and G-2 genes present in the matrix".into(),
-        ));
     }
 
     let pvals: Vec<f64> = results.iter().map(|r| r.p_value).collect();
@@ -122,7 +114,15 @@ pub fn run(opts: &Options) -> Result<Results> {
 
     let mut order: Vec<usize> = (0..results.len()).collect();
     if opts.sort {
-        order.sort_by(|&a, &b| results[a].p_value.partial_cmp(&results[b].p_value).unwrap());
+        order.sort_by(|&a, &b| {
+            let (pa, pb) = (results[a].p_value, results[b].p_value);
+            match (pa.is_nan(), pb.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => pa.partial_cmp(&pb).unwrap(),
+            }
+        });
     }
 
     let rows = order
@@ -160,9 +160,12 @@ pub fn write_results(res: &Results, out: &mut dyn Write) -> Result<()> {
         line.push_str(&row.name);
         line.push('\t');
         line.push_str(ni.format(row.n_genes));
-        if let Some(c) = row.correlation {
+        if res.has_correlation {
             line.push('\t');
-            line.push_str(fmt.format(c));
+            match row.correlation {
+                Some(c) => line.push_str(fmt.format(c)),
+                None => line.push_str("NA"),
+            }
         }
         line.push('\t');
         line.push_str(row.direction);

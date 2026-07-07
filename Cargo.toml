@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-edger-camera"
-version = "0.1.0"
+version = "0.1.1"
 description = "CAMERA competitive gene-set test accounting for inter-gene correlation (limma camera) — moderated-t z-scores, a variance-inflation factor from QR-rotated residual correlation, and a modified two-sample test per set; a clean-room Rust reimplementation of limma's camera"
 edition = "2024"
 rust-version = "1.91"

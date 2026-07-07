@@ -30,7 +30,7 @@ pub fn inter_gene_correlation(set_rows: &[&[f64]], qr: &Qr) -> (f64, f64) {
     for &row in set_rows {
         qr.rotated_residual(row, &mut u);
         let ss: f64 = u.iter().map(|&v| v * v).sum();
-        let scale = (ss / d as f64).sqrt();
+        let scale = (ss / d as f64).max(1e-8).sqrt();
         for (cs, &v) in col_sums.iter_mut().zip(&u) {
             *cs += v / scale;
         }
@@ -90,11 +90,16 @@ impl<'a> Engine<'a> {
                 (None, vif, g as f64 - 2.0)
             }
             Cor::Estimate { allow_neg } => {
-                let rows: Vec<&[f64]> = idx.iter().map(|&i| self.expr[i].as_slice()).collect();
-                let (vif, rho) = inter_gene_correlation(&rows, self.qr);
-                let used = if *allow_neg { vif } else { vif.max(1.0) };
                 let (n, p) = self.qr.dim();
-                (Some(rho), used, (n - p) as f64)
+                let df = ((n - p) as f64).min(g as f64 - 2.0);
+                if m1 > 1 {
+                    let rows: Vec<&[f64]> = idx.iter().map(|&i| self.expr[i].as_slice()).collect();
+                    let (vif, rho) = inter_gene_correlation(&rows, self.qr);
+                    let used = if *allow_neg { vif } else { vif.max(1.0) };
+                    (Some(rho), used, df)
+                } else {
+                    (None, 1.0, df)
+                }
             }
         };
 
@@ -106,22 +111,24 @@ impl<'a> Engine<'a> {
             name: name.to_string(),
             n_genes: m1,
             correlation,
-            up: zbar1 > zbar2,
+            up: !matches!(zbar1.partial_cmp(&zbar2), Some(std::cmp::Ordering::Less)),
             p_value,
         }
     }
 }
 
-/// Benjamini-Hochberg adjusted p-values, returned in input order.
+/// Benjamini-Hochberg adjusted p-values, returned in input order. NaN p-values
+/// (limma's degenerate sets) stay NaN and are excluded from the denominator, so
+/// the count of finite p-values sets the scale — matching R's p.adjust.
 pub fn bh_adjust(p: &[f64]) -> Vec<f64> {
-    let n = p.len();
-    let mut idx: Vec<usize> = (0..n).collect();
+    let mut idx: Vec<usize> = (0..p.len()).filter(|&i| !p[i].is_nan()).collect();
+    let lp = idx.len();
     idx.sort_by(|&a, &b| p[b].partial_cmp(&p[a]).unwrap());
-    let mut adj = vec![0.0; n];
+    let mut adj = vec![f64::NAN; p.len()];
     let mut cummin = f64::INFINITY;
     for (rank, &i) in idx.iter().enumerate() {
-        let m = (n - rank) as f64;
-        let v = (n as f64 / m * p[i]).min(1.0);
+        let m = (lp - rank) as f64;
+        let v = (lp as f64 / m * p[i]).min(1.0);
         cummin = cummin.min(v);
         adj[i] = cummin;
     }

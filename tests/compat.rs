@@ -9,6 +9,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const EPS: f64 = 1e-6;
+// A zero-variance gene forces the eBayes prior small, pushing moderated t into a
+// regime where limma's zscoreT(method="hill") approximation departs from our
+// exact tail-matched z by up to ~8e-6 per gene. Averaged over a small set this
+// leaves a ~1e-6 residual in the p-values (it cancels out at G=200, so the
+// well-conditioned goldens stay strict). This is limma's approximation, not our
+// error, so the zero-variance goldens carry a slightly looser bound.
+const DEG_EPS: f64 = 5e-6;
 
 fn ours() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rsomics-edger-camera"))
@@ -52,7 +59,10 @@ fn parse(text: &str) -> Table {
             .enumerate()
             .skip(1)
             .filter(|(i, _)| *i != dir_col)
-            .map(|(_, s)| s.trim().parse().unwrap())
+            .map(|(_, s)| match s.trim() {
+                "NA" | "NaN" | "nan" => f64::NAN,
+                t => t.parse().unwrap(),
+            })
             .collect();
         rows.insert(name, (nums, direction));
     }
@@ -60,6 +70,10 @@ fn parse(text: &str) -> Table {
 }
 
 fn assert_close(a: &Table, b: &Table, label: &str) {
+    assert_close_eps(a, b, label, EPS);
+}
+
+fn assert_close_eps(a: &Table, b: &Table, label: &str, eps: f64) {
     assert_eq!(a.header, b.header, "{label}: header mismatch");
     assert_eq!(a.rows.len(), b.rows.len(), "{label}: row count mismatch");
     let mut max_rel = 0.0f64;
@@ -71,19 +85,26 @@ fn assert_close(a: &Table, b: &Table, label: &str) {
         assert_eq!(dx, dy, "{label}: {name} direction {dx} vs {dy}");
         assert_eq!(x.len(), y.len(), "{label}: {name} width mismatch");
         for (vx, vy) in x.iter().zip(y) {
+            if vx.is_nan() || vy.is_nan() {
+                assert!(
+                    vx.is_nan() && vy.is_nan(),
+                    "{label}: {name} NaN mismatch ours={vx} ref={vy}"
+                );
+                continue;
+            }
             let rel = (vx - vy).abs() / vy.abs().max(1e-9);
             max_rel = max_rel.max(rel);
-            assert!(rel < EPS, "{label}: {name} ours={vx} ref={vy} rel={rel:e}");
+            assert!(rel < eps, "{label}: {name} ours={vx} ref={vy} rel={rel:e}");
         }
     }
     eprintln!("{label}: max relative deviation = {max_rel:e}");
 }
 
-fn run_ours(coef: usize, estimate: bool) -> String {
+fn run_ours_on(expr: &str, design: &str, gmt: &str, coef: usize, estimate: bool) -> String {
     let mut cmd = Command::new(ours());
-    cmd.arg(golden("expr.tsv"))
-        .args(["--design", golden("design.tsv").to_str().unwrap()])
-        .args(["--gene-sets", golden("sets.gmt").to_str().unwrap()])
+    cmd.arg(golden(expr))
+        .args(["--design", golden(design).to_str().unwrap()])
+        .args(["--gene-sets", golden(gmt).to_str().unwrap()])
         .args(["--coef", &coef.to_string()]);
     if estimate {
         cmd.arg("--estimate-cor");
@@ -95,6 +116,10 @@ fn run_ours(coef: usize, estimate: bool) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).unwrap()
+}
+
+fn run_ours(coef: usize, estimate: bool) -> String {
+    run_ours_on("expr.tsv", "design.tsv", "sets.gmt", coef, estimate)
 }
 
 #[test]
@@ -116,6 +141,61 @@ fn golden_estimate() {
         &parse(&ours_out),
         &parse(&expected),
         "camera estimate (golden)",
+    );
+}
+
+// Degenerate-path goldens: single-gene (m=1), (G-1)-gene, all-gene (m=G), and
+// all-absent (m=0) sets, plus a zero-variance gene. These exercise the paths the
+// original G=200 golden never touched — where the set-size filter dropped rows
+// (corrupting the BH denominator), a zero-variance gene shifted the eBayes prior,
+// and an all-zero rotated residual produced a NaN correlation.
+
+#[test]
+fn golden_mixed_fixed() {
+    let ours_out = run_ours_on(
+        "mixed_expr.tsv",
+        "deg_design.tsv",
+        "mixed_sets.gmt",
+        2,
+        false,
+    );
+    let expected = std::fs::read_to_string(golden("mixed_fixed.expected.tsv")).unwrap();
+    assert_close(&parse(&ours_out), &parse(&expected), "mixed fixed (golden)");
+}
+
+#[test]
+fn golden_zerovar_fixed() {
+    let ours_out = run_ours_on(
+        "zerovar_expr.tsv",
+        "deg_design.tsv",
+        "zerovar_sets.gmt",
+        2,
+        false,
+    );
+    let expected = std::fs::read_to_string(golden("zerovar_fixed.expected.tsv")).unwrap();
+    assert_close_eps(
+        &parse(&ours_out),
+        &parse(&expected),
+        "zerovar fixed (golden)",
+        DEG_EPS,
+    );
+}
+
+#[test]
+fn golden_zerovar_estimate() {
+    let ours_out = run_ours_on(
+        "zerovar_expr.tsv",
+        "deg_design.tsv",
+        "zerovar_sets.gmt",
+        2,
+        true,
+    );
+    let expected = std::fs::read_to_string(golden("zerovar_estimate.expected.tsv")).unwrap();
+    assert_close_eps(
+        &parse(&ours_out),
+        &parse(&expected),
+        "zerovar estimate (golden)",
+        DEG_EPS,
     );
 }
 
